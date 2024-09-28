@@ -1,0 +1,3 @@
+python -m torch.distributed.launch --nproc_per_node=1 --master_port 132933   test.py --dataset cod --pre /media/yf/yf/IOC/result/save_file/log_file/output7/20240925_114237/model_best.pth \
+ --gpu_id '2'  --only_dm --dilation --num_queries 700 --crop_size 256 --dm_count \
+ --dilation --branch_merge --branch_merge_way 2 --transformer_flag merge3 --with_weights --visual_path /media/yf/yf/IOC/visual_dm/exp_output7
