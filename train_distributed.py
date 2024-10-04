@@ -4,7 +4,7 @@ import os
 import warnings
 
 from config import return_args, args
-
+import torch
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_id
 import torch.nn as nn
 from torchvision import transforms
@@ -32,9 +32,10 @@ warnings.filterwarnings('ignore')
 setup_seed(args.seed)
 
 # model save path, set this path to where you would like to save model/log
-exp_save='/media/yf/yf/IOC1/result/'
+exp_save='/data/yf/IOC/result'
 
 def main(args):
+
     if args['dataset'] == 'jhu':
         train_file = './npydata/jhu_train.npy'
         test_file = './npydata/jhu_val.npy'
@@ -42,8 +43,8 @@ def main(args):
         train_file = './npydata/nwpu_train.npy'
         test_file = './npydata/nwpu_val.npy'
     elif args['dataset'] == 'cod':
-        train_file = './npydata/cod_train2048.npy'
-        test_file = './npydata/cod_val2048.npy'
+        train_file = '/data/yf/IOC/npydata/cod_train2048.npy'
+        test_file = '/data/yf/IOC/npydata/cod_val2048.npy'
         # train_file = '../CLTR/npydata/cod_train2048.npy'
         # test_file = '../CLTR/npydata/cod_val2048.npy'
 
@@ -59,7 +60,7 @@ def main(args):
 
     model = model.cuda()
     if args['distributed']:
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[args['local_rank']])
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[args['local_rank']],find_unused_parameters=True)
         path = exp_save+'/save_file/log_file/'+args['save_path']+'/' + time.strftime("%Y%m%d_%H%M%S", time.localtime(time.time()))
         args['save_path'] = path
         if not os.path.exists(args['save_path']) and args['local_rank'] == 0:
@@ -147,8 +148,8 @@ def main(args):
         train(train_data, model, criterion, optimizer, epoch, scheduler, logger, writer, args, dm_losses)
 
         '''inference '''
-        if epoch % args['test_per_epoch'] == 0 and epoch >= 100:
-
+        if epoch % args['test_per_epoch'] == 0 and epoch >= 200:
+        
             pred_mae, pred_mse, visi = validate(test_data, model, criterion, epoch, logger, args)
 
             writer.add_scalar('Metrcis/MAE', pred_mae, eval_epoch)
@@ -213,13 +214,26 @@ def train(Pre_data, model, criterion, optimizer, epoch, scheduler, logger, write
                                      shuffle=True,
                                      transform=transforms.Compose([
                                          transforms.RandomGrayscale(p=args['gray_p'] if args['gray_aug'] else 0),
+                                         
                                          transforms.ToTensor(),
-
+                                         
                                          transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                                               std=[0.229, 0.224, 0.225]),
                                      ]),
                                      train=True,
                                      args=args)
+
+#     transform=transforms.Compose([
+#     transforms.RandomGrayscale(p=args['gray_p'] if args['gray_aug'] else 0),
+#     transforms.RandomHorizontalFlip(),
+#     transforms.RandomVerticalFlip(),
+#     transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.2, hue=0.3),
+#     transforms.RandomApply([transforms.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 5.0))], p=0.5),
+#     transforms.RandomApply([transforms.Lambda(lambda img: img + torch.randn_like(img) * 0.1)], p=0.5),
+#     transforms.ToTensor(),
+#     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+# ])
+
 
     if args['distributed']:
         datasampler = DistributedSampler(train_data, num_replicas=dist.get_world_size(), rank=args['local_rank'])
@@ -242,10 +256,11 @@ def train(Pre_data, model, criterion, optimizer, epoch, scheduler, logger, write
     loss_log = []
 
     print(len(train_loader))
+    #处理每个批次的数据
     for i, (fname, img, targets) in enumerate(train_loader):
         ## img: torch.Size([16, 3, 256, 256])
         img = img.cuda()
-        
+        #
         # import pdb; pdb.set_trace()
         N=img.shape[0]
         out_all=model(img)
@@ -259,6 +274,12 @@ def train(Pre_data, model, criterion, optimizer, epoch, scheduler, logger, write
             ot_loss=ot_loss*wot
             # Compute counting loss
             count_loss = dm_losses[2](out_dm[1].sum(1).sum(1).sum(1), torch.from_numpy(gd_count).float().cuda())
+            count_loss1= dm_losses[2](out_dm[4].sum(1).sum(1).sum(1), torch.from_numpy(gd_count).float().cuda())
+            count_loss2= dm_losses[2](out_dm[7].sum(1).sum(1).sum(1), torch.from_numpy(gd_count).float().cuda())
+            count_loss3= dm_losses[2](out_dm[10].sum(1).sum(1).sum(1), torch.from_numpy(gd_count).float().cuda())
+
+            count_loss = (count_loss + count_loss1 + count_loss2+count_loss3) / 4.0
+
             # Compute TV loss
             gd_count_tensor = torch.from_numpy(gd_count).float().cuda().unsqueeze(1).unsqueeze(2).unsqueeze(3)
             gt_discrete = [t['gt_map'].cuda() for t in targets]
@@ -332,6 +353,7 @@ def validate(Pre_data, model, criterion, epoch, logger, args):
     mae = 0.0
     mse = 0.0
     visi = []
+   
 
     for i, (fname, img, kpoint, targets, patch_info) in enumerate(test_loader):
 
@@ -358,6 +380,7 @@ def validate(Pre_data, model, criterion, epoch, logger, args):
         prob = out_logits.sigmoid()
         prob = prob.view(1, -1, 2)
         out_logits = out_logits.view(1, -1, 2)
+    
         topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1),
                                                kpoint.shape[0] * args['num_queries'], dim=1)
         count = 0
@@ -380,10 +403,14 @@ def validate(Pre_data, model, criterion, epoch, logger, args):
         mae += abs(count - gt_count)
         mse += abs(count - gt_count) * abs(count - gt_count)
 
+        
+
     mae = mae / len(test_loader)
     mse = math.sqrt(mse / len(test_loader))
 
     print('mae', mae, 'mse', mse)
+
+
     return mae, mse, visi
 
 

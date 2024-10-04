@@ -19,12 +19,13 @@ from util import box_ops
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size, interpolate,
                        is_dist_avail_and_initialized, inverse_sigmoid)
-
+from torch.jit import script
 from .backbone import build_backbone
 from .matcher import build_matcher
 from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm,
                            dice_loss, sigmoid_focal_loss, sigmoid_focal_loss2)
 from .transformer import build_transformer
+from torchvision.ops import DeformConv2d  # 如果使用的是torchvision
 
 
 class ConditionalDETR(nn.Module):
@@ -210,14 +211,31 @@ class dm_decoder2(nn.Module):
         mu2_sum = mu2.view([B,-1]).sum(1).unsqueeze(1).unsqueeze(2).unsqueeze(3) #[8,1,1,1]
         mu2_normed = mu2 / (mu2_sum + 1e-6) #[8,1,32,32]
 
+        # shallow_feature = F.upsample_bilinear(shallow_feature, scale_factor=0.5)#[8,256,32,32]
+        # shallow=self.reglayer1(shallow_feature) #[8,128,32,32]
+        # x_shallow=shallow.clone()#[8,128,32,32]
+        # mu_shallow = self.density_layer(shallow) #[8,1,32,32]
+        # mu2_shallow = F.relu(mu_shallow) #[8,1,32,32]
+        # B, C, H, W=mu2_shallow.size() 
+        # mu2_sum_shallow = mu2_shallow.view([B,-1]).sum(1).unsqueeze(1).unsqueeze(2).unsqueeze(3) #[8,1,1,1]
+        # mu2_normed_shallow = mu2_shallow / (mu2_sum_shallow + 1e-6) #[8,1,32,32]
+
+        shallow_copy=shallow_feature.clone()#[8,256,64,64]
+        shallow_copy=self.reglayer1(shallow_copy) #[8,128,64,64]
+        mu_shallow = self.density_layer(shallow_copy) #[8,1,64,64]
+        mu2_shallow = F.relu(mu_shallow) #[8,1,64,64]
+        B, C, H, W=mu2_shallow.size()
+        mu2_sum_shallow = mu2_shallow.view([B,-1]).sum(1).unsqueeze(1).unsqueeze(2).unsqueeze(3) #[8,1,1,1]
+        mu2_normed_shallow = mu2_shallow / (mu2_sum_shallow + 1e-6) #[8,1,64,64]
+
         shallow_feature = F.upsample_bilinear(shallow_feature, scale_factor=0.5)#[8,256,32,32]
         shallow=self.reglayer1(shallow_feature) #[8,128,32,32]
         x_shallow=shallow.clone()#[8,128,32,32]
-        mu_shallow = self.density_layer(shallow) #[8,1,32,32]
-        mu2_shallow = F.relu(mu_shallow) #[8,1,32,32]
-        B, C, H, W=mu2_shallow.size() 
-        mu2_sum_shallow = mu2_shallow.view([B,-1]).sum(1).unsqueeze(1).unsqueeze(2).unsqueeze(3) #[8,1,1,1]
-        mu2_normed_shallow = mu2_shallow / (mu2_sum_shallow + 1e-6) #[8,1,32,32]
+        # mu_shallow = self.density_layer(shallow) #[8,1,32,32]
+        # mu2_shallow = F.relu(mu_shallow) #[8,1,32,32]
+        # B, C, H, W=mu2_shallow.size() 
+        # mu2_sum_shallow = mu2_shallow.view([B,-1]).sum(1).unsqueeze(1).unsqueeze(2).unsqueeze(3) #[8,1,1,1]
+        # mu2_normed_shallow = mu2_shallow / (mu2_sum_shallow + 1e-6) #[8,1,32,32]
 
         medium=self.reglayer2(medium_feature) #[8,128,32,32]
         x_medium=medium.clone()#[8,128,32,32]
@@ -265,108 +283,7 @@ class dm_decoder2(nn.Module):
 
         return [self.reg_layer2(x2), mu2, mu2_normed,self.reg_layer2(x_shallow),mu2_shallow,mu2_normed_shallow,self.reg_layer2(x_medium),mu2_medium,mu2_normed_medium,self.reg_layer2(x_deep),mu2_deep,mu2_normed_deep]
 
-# class dm_decoder2(nn.Module):
-#     def __init__(self,dim_feedforward=2048, hidden_dim=256, hidden_dim2=128,hidden_dim3=512,hidden_dim4=1024):
-#         super(dm_decoder2, self).__init__()
-#         self.reg_layer=nn.Sequential(
-#             nn.Conv2d(dim_feedforward, hidden_dim, kernel_size=3, padding=1),
-#             nn.ReLU(inplace=True),
-#             nn.Conv2d(hidden_dim, hidden_dim2, kernel_size=3, padding=1),
-#             nn.ReLU(inplace=True),
-#             )
-#         self.reglayer1=nn.Sequential(
-#             nn.Conv2d(hidden_dim,hidden_dim2,kernel_size=3,padding=1),
-#             nn.ReLU(inplace=True),
-#         )
-#         self.reglayer2=nn.Sequential(
-#             nn.Conv2d(hidden_dim3,hidden_dim,kernel_size=3,padding=1),
-#             nn.ReLU(inplace=True),
-#             nn.Conv2d(hidden_dim, hidden_dim2, kernel_size=3, padding=1),
-#             nn.ReLU(inplace=True),
-#         )
-#         self.reglayer3=nn.Sequential(
-#             nn.Conv2d(hidden_dim4, hidden_dim, kernel_size=3, padding=1),
-#             nn.ReLU(inplace=True),
-#             nn.Conv2d(hidden_dim, hidden_dim2, kernel_size=3, padding=1),
-#             nn.ReLU(inplace=True),
-#         )
-#         self.density_layer1=nn.Conv2d(hidden_dim, hidden_dim2, 1)
-#         self.density_layer2 = nn.Conv2d(hidden_dim2, hidden_dim2, 1)
-#         self.density_layer = nn.Conv2d(128, 1, 1)
-#         self.reg_layer2=nn.Sequential(
-#             nn.Conv2d(hidden_dim2, hidden_dim2, kernel_size=1, padding=0),
-#             nn.ReLU(inplace=True),
-#             nn.Conv2d(hidden_dim2, hidden_dim, kernel_size=1, padding=0),
-#             nn.ReLU(inplace=True),
-#             )
-#         # self.dm_activation = nn.ReLU()
-#     def forward(self,shallow_feature,medium_feature,x):
-#         x = F.upsample_bilinear(x, scale_factor=2) #[8,2048,32,32]
-#         x = self.reg_layer(x) #[8,128,32,32]
-#         x2=x.clone() #[8,128,32,32]
-#         mu = self.density_layer(x) #[8,1,32,32]
-#         mu2 = F.relu(mu) #[8,1,32,32]
-#         B, C, H, W=mu2.size() 
-#         mu2_sum = mu2.view([B,-1]).sum(1).unsqueeze(1).unsqueeze(2).unsqueeze(3) #[8,1,1,1]
-#         mu2_normed = mu2 / (mu2_sum + 1e-6) #[8,1,32,32]
 
-#         shallow_feature = F.upsample_bilinear(shallow_feature, scale_factor=0.5)#[8,256,32,32]
-#         shallow=self.reglayer1(shallow_feature) #[8,128,32,32]
-#         x_shallow=shallow.clone()#[8,128,32,32]
-#         mu_shallow = self.density_layer(x_shallow) #[8,1,32,32]
-#         mu2_shallow = F.relu(mu_shallow) #[8,1,32,32]
-#         B, C, H, W=mu2_shallow.size() 
-#         mu2_sum_shallow = mu2_shallow.view([B,-1]).sum(1).unsqueeze(1).unsqueeze(2).unsqueeze(3) #[8,1,1,1]
-#         mu2_normed_shallow = mu2_shallow / (mu2_sum_shallow + 1e-6) #[8,1,32,32]
-
-#         # medium_feature = F.upsample_bilinear(medium_feature, scale_factor=2)#[8,512,64,64]
-#         medium=self.reglayer2(medium_feature) #[8,128,32,32]
-#         x_medium=medium.clone()#[8,128,32,32]
-#         mu_medium = self.density_layer(x_medium) #[8,1,32,32]
-#         mu2_medium = F.relu(mu_medium) #[8,1,32,32]
-#         B, C, H, W=mu2_medium.size() 
-#         mu2_sum_medium = mu2_medium.view([B,-1]).sum(1).unsqueeze(1).unsqueeze(2).unsqueeze(3) #[8,1,1,1]
-#         mu2_normed_medium = mu2_medium / (mu2_sum_medium + 1e-6) #[8,1,32,32]
-
-#         # deep_feature = F.upsample_bilinear(deep_feature, scale_factor=2)#[8,1024,32,32]
-#         # deep=self.reglayer3(deep_feature) #[8,128,32,32]
-#         # x_deep=deep.clone()
-#         # mu_deep = self.density_layer(x_deep) #[8,1,32,32]
-#         # mu2_deep = F.relu(mu_deep) #[8,1,32,32]
-#         # B, C, H, W=mu2_deep.size() 
-#         # mu2_sum_deep = mu2_deep.view([B,-1]).sum(1).unsqueeze(1).unsqueeze(2).unsqueeze(3) #[8,1,1,1]
-#         # mu2_normed_deep = mu2_deep / (mu2_sum_deep + 1e-6) #[8,1,32,32]
-
-#         return [self.reg_layer2(x2), mu2, mu2_normed,self.reg_layer2(x_shallow),mu2_shallow,mu2_normed_shallow,self.reg_layer2(x_medium),mu2_medium,mu2_normed_medium]
-
-
-# class dm_decoder2(nn.Module):
-#     def __init__(self,dim_feedforward=2048, hidden_dim=256, hidden_dim2=128):
-#         super(dm_decoder2, self).__init__()
-#         self.reg_layer=nn.Sequential(
-#             nn.Conv2d(dim_feedforward, hidden_dim, kernel_size=3, padding=1),
-#             nn.ReLU(inplace=True),
-#             nn.Conv2d(hidden_dim, hidden_dim2, kernel_size=3, padding=1),
-#             nn.ReLU(inplace=True),
-#             )
-#         self.density_layer = nn.Conv2d(128, 1, 1)
-#         self.reg_layer2=nn.Sequential(
-#             nn.Conv2d(hidden_dim2, hidden_dim2, kernel_size=1, padding=0),
-#             nn.ReLU(inplace=True),
-#             nn.Conv2d(hidden_dim2, hidden_dim, kernel_size=1, padding=0),
-#             nn.ReLU(inplace=True),
-#             )
-#         # self.dm_activation = nn.ReLU()
-#     def forward(self,x):
-#         x = F.upsample_bilinear(x, scale_factor=2)
-#         x = self.reg_layer(x)
-#         x2=x.clone()
-#         mu = self.density_layer(x)
-#         mu2 = F.relu(mu)
-#         B, C, H, W=mu2.size()
-#         mu2_sum = mu2.view([B,-1]).sum(1).unsqueeze(1).unsqueeze(2).unsqueeze(3)
-#         mu2_normed = mu2 / (mu2_sum + 1e-6)
-#         return [self.reg_layer2(x2), mu2, mu2_normed]
 
 class SetCriterion(nn.Module):
     """ This class computes the loss for Conditional DETR.
@@ -604,9 +521,9 @@ class MLP(nn.Module):
         for i, layer in enumerate(self.layers):
             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
         return x
+    
 
-
-
+        
 def build(args):
     # the `num_classes` naming here is somewhat misleading.
     # it indeed corresponds to `max_obj_id + 1`, where max_obj_id
